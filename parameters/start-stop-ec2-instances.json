@@ -1,0 +1,7 @@
+{
+  "InstanceIds": [
+    "<EC2_INSTANCE_ID_1>",
+    "<EC2_INSTANCE_ID_2>",
+    "<EC2_INSTANCE_ID_3>"
+  ]
+}
