@@ -1,0 +1,11 @@
+{
+  "Name": "my-scheduler",
+  "Description": "This is a test scheduler",
+  "StartTime": "9:00",
+  "StopTime": "6:00",
+  "InstanceIds": [
+    "<EC2_INSTANCE_ID_1>",
+    "<EC2_INSTANCE_ID_2>",
+    "<EC2_INSTANCE_ID_3>"
+  ]
+}
