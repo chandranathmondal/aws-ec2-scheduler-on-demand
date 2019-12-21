@@ -1,0 +1,487 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'AWS EC2 Scheduler: On-demand'
+
+Resources:
+  StartEC2Instances:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.7
+      Role: !GetAtt LambdaEC2StartInstances.Arn
+      FunctionName: start-ec2-instances
+      Handler: index.lambda_handler
+      Timeout: 10
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import logging
+          import boto3
+          
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          ec2 = boto3.client('ec2')
+          
+          def lambda_handler(event, context):
+            instance_ids = event['InstanceIds']
+            ec2.start_instances(InstanceIds=instance_ids)
+            logger.info('Started instance(s): ' + str(instance_ids))
+            return {
+              'statusCode': 200,
+              'body': json.dumps('Started instance(s): ' + str(instance_ids))
+            }
+    DependsOn: 
+      - EC2StartInstances
+      - CloudwatchLogMessage
+
+  StopEC2Instances:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.7
+      Role: !GetAtt LambdaEC2StopInstances.Arn
+      FunctionName: stop-ec2-instances
+      Handler: index.lambda_handler
+      Timeout: 10
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import logging
+          import boto3
+          
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          ec2 = boto3.client('ec2')
+          
+          def lambda_handler(event, context):
+            instance_ids = event['InstanceIds']
+            ec2.stop_instances(InstanceIds=instance_ids)
+            logger.info('Stopped instance(s): ' + str(instance_ids))
+            return {
+              'statusCode': 200,
+              'body': json.dumps('Stopped instance(s): ' + str(instance_ids))
+            }
+    DependsOn: 
+      - EC2StopInstances
+      - CloudwatchLogMessage
+
+  CreateEC2Scheduler:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.7
+      Role: !GetAtt LambdaEC2CreateScheduler.Arn
+      FunctionName: create-ec2-scheduler
+      Handler: index.lambda_handler
+      Timeout: 10
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import logging
+          import boto3
+          
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          events = boto3.client('events')
+          
+          def put_rule(name, description, time):
+            time_components = time.split(':')
+            hour = time_components[0]
+            minute = time_components[1]
+            
+            events.put_rule(
+              Name = name,
+              ScheduleExpression = 'cron(' + minute + ' ' + hour + ' * * ? *)',
+              State = 'ENABLED',
+              Description = description
+            )
+            
+            logger.info("Rule '" + name + "' created successfully.")
+            
+          def put_target(rule, arn, instance_ids):
+            events.put_targets(
+              Rule = rule,
+              Targets = [
+                {
+                  'Id': rule,
+                  'Arn': arn,
+                  'Input' : "{ \"InstanceIds\" : " + str(instance_ids).replace('\'', '\"') + " }"
+                }
+              ]
+            )
+            
+            logger.info("Target added successfully to the rule '" + rule + "'")
+          
+          def create_start_scheduler(name, description, time, instance_ids, region_name, account_id):
+            rule = name + '-start'
+            put_rule(name=rule, description=description, time=time)
+            put_target(rule=rule, arn='arn:aws:lambda:' + region_name + ':' + account_id + ':function:start-ec2-instances', instance_ids=instance_ids)
+            
+          def create_stop_scheduler(name, description, time, instance_ids, region_name, account_id):
+            rule = name + "-stop"
+            put_rule(name=rule, description=description, time=time)
+            put_target(rule=rule, arn='arn:aws:lambda:' + region_name + ':' + account_id + ':function:stop-ec2-instances', instance_ids=instance_ids)
+            
+          def lambda_handler(event, context):
+            name = event['Name']
+            description = event['Description']
+            start_time = event['StartTime']
+            stop_time = event['StopTime']
+            instance_ids = event['InstanceIds']
+            
+            region_name = events.meta.region_name
+            account_id = context.invoked_function_arn.split(':')[4]
+            
+            create_start_scheduler(name=name, description=description, time=start_time, instance_ids=instance_ids, region_name=region_name, account_id=account_id)
+            create_stop_scheduler(name=name, description=description, time=stop_time, instance_ids=instance_ids, region_name=region_name, account_id=account_id)
+            
+            return {
+              'statusCode': 200,
+              'body': json.dumps('Scheduler created successfully.')
+            }
+            
+    DependsOn: 
+      - EventbridgeCreateRule
+      - CloudwatchLogMessage
+
+  DeleteEC2Scheduler:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.7
+      Role: !GetAtt LambdaEC2DeleteScheduler.Arn
+      FunctionName: delete-ec2-scheduler
+      Handler: index.lambda_handler
+      Timeout: 10
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import logging
+          import boto3
+          
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          events = boto3.client('events')
+          
+          def delete_rule(name):
+            events.remove_targets(
+              Rule = name,
+              Ids = [
+                name
+              ],
+              Force = True
+            )
+            
+            logger.info("Target removed from rule '" + name + "'.")
+            
+            events.delete_rule(
+              Name = name,
+              Force = True
+            )
+            
+            logger.info("Rule '" + name + "' deleted successfully.")
+            
+            def lambda_handler(event, context):
+              name = event['Name']
+              
+              delete_rule(name=name + "-start")
+              delete_rule(name=name + "-stop")
+              
+              return {
+                'statusCode': 200,
+                'body': json.dumps('Scheduler deleted successfully.')
+              }
+            
+    DependsOn: 
+      - EventbridgeDeleteRule
+      - EventbridgeRemoveTargets
+      - CloudwatchLogMessage
+
+  EnableEC2Scheduler:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.7
+      Role: !GetAtt LambdaEC2EnableScheduler.Arn
+      FunctionName: enable-ec2-scheduler
+      Handler: index.lambda_handler
+      Timeout: 10
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import logging
+          import boto3
+          
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          events = boto3.client('events')
+          
+          def enable_rule(name):
+            events.enable_rule(
+              Name = name
+            )
+            
+          logger.info("Rule '" + name + "' is enabled successfully.")
+          
+          def lambda_handler(event, context):
+            name = event['Name']
+            
+            enable_rule(name=name + "-start")
+            enable_rule(name=name + "-stop")
+            
+            return {
+              'statusCode': 200,
+              'body': json.dumps('Scheduler enabled successfully.')
+            }
+            
+    DependsOn: 
+      - EventbridgeEnableRule
+      - CloudwatchLogMessage
+
+  DisableEC2Scheduler:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.7
+      Role: !GetAtt LambdaEC2DisableScheduler.Arn
+      FunctionName: disable-ec2-scheduler
+      Handler: index.lambda_handler
+      Timeout: 10
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import logging
+          import boto3
+          
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          events = boto3.client('events')
+          
+          def disable_rule(name):
+            events.disable_rule(
+              Name = name
+            )
+            
+          logger.info("Rule '" + name + "' is disabled successfully.")
+          
+          def lambda_handler(event, context):
+            name = event['Name']
+            
+            disable_rule(name=name + "-start")
+            disable_rule(name=name + "-stop")
+            
+            return {
+              'statusCode': 200,
+              'body': json.dumps('Scheduler disabled successfully.')
+            }
+            
+    DependsOn: 
+      - EventbridgeDisableRule
+      - CloudwatchLogMessage
+
+  StartEC2InstancesPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt StartEC2Instances.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: events.amazonaws.com
+      SourceArn: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/*'
+  
+  StopEC2InstancesPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt StopEC2Instances.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: events.amazonaws.com
+      SourceArn: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/*'
+  
+  LambdaEC2StartInstances:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lambda-ec2-start-instances
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref EC2StartInstances
+        - !Ref CloudwatchLogMessage
+
+  LambdaEC2StopInstances:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lambda-ec2-stop-instances
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref EC2StopInstances
+        - !Ref CloudwatchLogMessage
+
+  LambdaEC2CreateScheduler:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lambda-ec2-create-scheduler
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref EventbridgeCreateRule
+        - !Ref CloudwatchLogMessage
+
+  LambdaEC2DeleteScheduler:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lambda-ec2-delete-scheduler
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref EventbridgeCreateRule
+        - !Ref EventbridgeRemoveTargets
+        - !Ref CloudwatchLogMessage
+
+  LambdaEC2EnableScheduler:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lambda-ec2-enable-scheduler
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref EventbridgeEnableRule
+        - !Ref CloudwatchLogMessage
+
+  LambdaEC2DisableScheduler:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lambda-ec2-disable-scheduler
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref EventbridgeDisableRule
+        - !Ref CloudwatchLogMessage
+
+  EC2StartInstances:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: ec2-start-instances
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: ec2:StartInstances
+            Resource: '*'
+    
+  EC2StopInstances:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: ec2-stop-instances
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: ec2:StopInstances
+            Resource: '*'
+    
+  EventbridgeCreateRule:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: eventbridge-create-rule
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: 
+              - 'events:PutRule'
+              - 'events:PutTargets'
+            Resource: '*'
+    
+  EventbridgeDeleteRule:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: eventbridge-delete-rule
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: events:DeleteRule
+            Resource: '*'
+    
+  EventbridgeEnableRule:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: eventbridge-enable-rule
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: events:EnableRule
+            Resource: '*'
+    
+  EventbridgeDisableRule:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: eventbridge-disable-rule
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: events:DisableRule
+            Resource: '*'
+    
+  EventbridgeRemoveTargets:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: eventbridge-remove-targets
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: events:RemoveTargets
+            Resource: '*'
+    
+  CloudwatchLogMessage:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: cloudwatch-log-message
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: 'arn:aws:logs:*:*:*'
+          - Effect: Allow
+            Action: logs:CreateLogGroup
+            Resource: 'arn:aws:logs:*:*:*'
+ 
