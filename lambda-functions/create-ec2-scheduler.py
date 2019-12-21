@@ -36,15 +36,15 @@ def put_target(rule, arn, instance_ids):
     
     logger.info("Target added successfully to the rule '" + rule + "'")
     
-def create_start_scheduler(name, description, time, instance_ids):
+def create_start_scheduler(name, description, time, instance_ids, region_name, account_id):
     rule = name + '-start'
     put_rule(name=rule, description=description, time=time)
-    put_target(rule=rule, arn='arn:aws:lambda:<AWS_REGION>:<AWS_ACCOUNT_ID>:function:start-ec2-instances', instance_ids=instance_ids)
+    put_target(rule=rule, arn='arn:aws:lambda:' + region_name + ':' + account_id + ':function:start-ec2-instances', instance_ids=instance_ids)
     
-def create_stop_scheduler(name, description, time, instance_ids):
+def create_stop_scheduler(name, description, time, instance_ids, region_name, account_id):
     rule = name + "-stop"
     put_rule(name=rule, description=description, time=time)
-    put_target(rule=rule, arn='arn:aws:lambda:<AWS_REGION>:<AWS_ACCOUNT_ID>:function:stop-ec2-instances', instance_ids=instance_ids)
+    put_target(rule=rule, arn='arn:aws:lambda:' + region_name + ':' + account_id + ':function:stop-ec2-instances', instance_ids=instance_ids)
 
 def lambda_handler(event, context):
     name = event['Name']
@@ -53,8 +53,11 @@ def lambda_handler(event, context):
     stop_time = event['StopTime']
     instance_ids = event['InstanceIds']
     
-    create_start_scheduler(name=name, description=description, time=start_time, instance_ids=instance_ids)
-    create_stop_scheduler(name=name, description=description, time=stop_time, instance_ids=instance_ids)
+    region_name = events.meta.region_name
+    account_id = context.invoked_function_arn.split(':')[4]
+    
+    create_start_scheduler(name=name, description=description, time=start_time, instance_ids=instance_ids, region_name=region_name, account_id=account_id)
+    create_stop_scheduler(name=name, description=description, time=stop_time, instance_ids=instance_ids, region_name=region_name, account_id=account_id)
     
     return {
         'statusCode': 200,
